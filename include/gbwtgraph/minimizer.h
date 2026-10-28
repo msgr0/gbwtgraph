@@ -570,6 +570,7 @@ public:
     this->hash_table.swap(another.hash_table);
     std::swap(this->downweight, another.downweight);
     this->frequent_kmers.swap(another.frequent_kmers);
+    this->frequent_filter.swap(another.frequent_filter);
   }
 
   KmerIndex& operator=(const KmerIndex& source)
@@ -590,6 +591,7 @@ public:
       this->hash_table = std::move(source.hash_table);
       this->downweight = std::move(source.downweight);
       this->frequent_kmers = std::move(source.frequent_kmers);
+      this->frequent_filter = std::move(source.frequent_filter);
     }
     return *this;
   }
@@ -850,6 +852,28 @@ private:
   size_t downweight;
   std::vector<key_type> frequent_kmers;
 
+  // A bitmap of the frequent kmers' hashes, derived from frequent_kmers, so
+  // that hash() can skip probing frequent_kmers for most kmers. If empty,
+  // hash() always probes.
+  constexpr static size_t FREQUENT_FILTER_BITS = size_t(1) << 18;
+  std::vector<std::uint64_t> frequent_filter;
+
+  static size_t frequent_filter_bit(size_t h) { return (h >> 20) & (FREQUENT_FILTER_BITS - 1); }
+
+  // Rebuild frequent_filter from frequent_kmers.
+  void build_frequent_filter()
+  {
+    this->frequent_filter.clear();
+    if(this->frequent_kmers.empty()) { return; }
+    this->frequent_filter.resize(FREQUENT_FILTER_BITS / 64, 0);
+    for(key_type key : this->frequent_kmers)
+    {
+      if(key == key_type::no_key()) { continue; }
+      size_t bit = frequent_filter_bit(key.hash());
+      this->frequent_filter[bit / 64] |= std::uint64_t(1) << (bit % 64);
+    }
+  }
+
   // Needed for serialization.
   friend class MinimizerHeader;
   friend class MinimizerIndex<KeyType>;
@@ -917,6 +941,7 @@ private:
 
     this->downweight = source.downweight;
     this->frequent_kmers = source.frequent_kmers;
+    this->frequent_filter = source.frequent_filter;
   }
 
   // Clears the value stored in the given cell.
@@ -1183,6 +1208,11 @@ private:
     if(this->frequent_kmers.empty()) { return key.hash(); }
 
     size_t h = key.hash();
+    if(!this->frequent_filter.empty())
+    {
+      size_t bit = frequent_filter_bit(h);
+      if(!((this->frequent_filter[bit / 64] >> (bit % 64)) & 1)) { return h; }
+    }
     size_t offset = h & (this->frequent_kmers.size() - 1);
     for(size_t attempt = 0; attempt < this->frequent_kmers.size(); attempt++)
     {
@@ -1540,6 +1570,7 @@ public:
 
     // Load the frequent kmers.
     io::load_vector(in, this->index.frequent_kmers);
+    this->index.build_frequent_filter();
   }
 
   // For testing.
@@ -2001,6 +2032,7 @@ public:
       this->index.insert_frequent(key);
       this->index.insert_frequent(key.reverse_complement(this->k()));
     }
+    this->index.build_frequent_filter();
     this->index.downweight = iterations;
     this->header.set_int(MinimizerHeader::FLAG_WEIGHT_MASK, MinimizerHeader::FLAG_WEIGHT_OFFSET, iterations);
   }
