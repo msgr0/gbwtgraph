@@ -861,25 +861,33 @@ private:
   size_t downweight;
   std::vector<key_type> frequent_kmers;
 
-  // A bitmap of the frequent kmers' hashes, derived from frequent_kmers, so
-  // that hash() can skip probing frequent_kmers for most kmers. If empty,
+  // A Bloom filter of the frequent kmers' hashes, derived from frequent_kmers,
+  // so that hash() can skip probing frequent_kmers for most kmers. If empty,
   // hash() always probes.
-  constexpr static size_t FREQUENT_FILTER_BITS = size_t(1) << 18;
+  constexpr static size_t FREQUENT_FILTER_WORDS = size_t(1) << 12;
   std::vector<std::uint64_t> frequent_filter;
 
-  static size_t frequent_filter_bit(size_t h) { return (h >> 20) & (FREQUENT_FILTER_BITS - 1); }
+  // The word of frequent_filter that holds the bits for hash value h.
+  static size_t frequent_filter_word(size_t h) { return (h >> 20) & (FREQUENT_FILTER_WORDS - 1); }
+
+  // The three bits that hash value h sets in its word. We keep them in one
+  // word so that a query reads a single word of the filter.
+  static std::uint64_t frequent_filter_mask(size_t h)
+  {
+    return (std::uint64_t(1) << ((h >> 32) & 63)) | (std::uint64_t(1) << ((h >> 38) & 63)) | (std::uint64_t(1) << ((h >> 44) & 63));
+  }
 
   // Rebuild frequent_filter from frequent_kmers.
   void build_frequent_filter()
   {
     this->frequent_filter.clear();
     if(this->frequent_kmers.empty()) { return; }
-    this->frequent_filter.resize(FREQUENT_FILTER_BITS / 64, 0);
+    this->frequent_filter.resize(FREQUENT_FILTER_WORDS, 0);
     for(key_type key : this->frequent_kmers)
     {
       if(key == key_type::no_key()) { continue; }
-      size_t bit = frequent_filter_bit(key.hash());
-      this->frequent_filter[bit / 64] |= std::uint64_t(1) << (bit % 64);
+      size_t h = key.hash();
+      this->frequent_filter[frequent_filter_word(h)] |= frequent_filter_mask(h);
     }
   }
 
@@ -1219,8 +1227,8 @@ private:
     size_t h = key.hash();
     if(!this->frequent_filter.empty())
     {
-      size_t bit = frequent_filter_bit(h);
-      if(!((this->frequent_filter[bit / 64] >> (bit % 64)) & 1)) { return h; }
+      std::uint64_t mask = frequent_filter_mask(h);
+      if((this->frequent_filter[frequent_filter_word(h)] & mask) != mask) { return h; }
     }
     size_t offset = h & (this->frequent_kmers.size() - 1);
     for(size_t attempt = 0; attempt < this->frequent_kmers.size(); attempt++)
